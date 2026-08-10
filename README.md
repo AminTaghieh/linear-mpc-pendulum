@@ -4,19 +4,37 @@ Linear MPC for a damped pendulum. The plant is integrated as the full nonlinear 
 
 ## Model
 
+The nonlinear pendulum dynamics are
+
 $$
-\dot{\theta} = \omega,
-\qquad
-\dot{\omega} = -\frac{g}{l}\sin\theta - \frac{b}{ml^{2}}\omega + \frac{u}{ml^{2}}
+\dot{\theta} = \omega, \qquad \dot{\omega} = -\frac{g}{l}\sin\theta - \frac{b}{ml^{2}}\omega + \frac{u}{ml^{2}}
 $$
 
-State $x = [\theta, \omega]^{\top}$, input $u$ the pivot torque, $b$ viscous friction.
+The state is
 
-The angle is measured from the downward equilibrium, so $\theta = 0$ is open-loop stable. This is a regulation problem, not inverted-pendulum stabilization. With the default parameters the continuous-time linearized open-loop poles are $-0.075 \pm 3.131j$: roughly 0.5 Hz with a 13 s envelope time constant.
+$$
+x =
+\begin{bmatrix}
+\theta \\
+\omega
+\end{bmatrix}
+$$
+
+where $u$ is the pivot torque and $b$ is the viscous friction coefficient.
+
+The angle is measured from the downward equilibrium, so $\theta = 0$ is open-loop stable. This is a regulation problem, not inverted-pendulum stabilization.
+
+With the default parameters, the continuous-time linearized open-loop poles are approximately $-0.075 \pm 3.131j$, corresponding to an oscillation frequency of roughly $0.5$ Hz and a damping envelope time constant of about $13$ s.
 
 ## Linearization
 
-Jacobians are taken symbolically with SymPy at $(\theta, \omega, u) = (0,0,0)$:
+Jacobians are taken symbolically with SymPy at $(\theta, \omega, u) = (0, 0, 0)$. The continuous-time linear model is
+
+$$
+\dot{x} = A_c x + B_c u
+$$
+
+with
 
 $$
 A_c =
@@ -32,47 +50,83 @@ B_c =
 \end{bmatrix}
 $$
 
-then discretized with a zero-order hold via `scipy.signal.cont2discrete`. Only $(A_d, B_d)$ reach the controller.
+The model is then discretized with a zero-order hold using `scipy.signal.cont2discrete`, giving
+
+$$
+x_{k+1} = A_d x_k + B_d u_k
+$$
+
+Only $(A_d, B_d)$ are used by the MPC controller.
 
 ## Controller
 
+At each sampling instant $k$, the MPC solves
+
 $$
-\min_{x,u} \quad \sum_{i=0}^{N-1} \left( x_i^{\top} Q x_i + u_i^{\top} R u_i \right) + x_N^{\top} P x_N
+\min_{X, U} \quad \sum_{i=0}^{N-1} \left( x_{i|k}^{\top} Q x_{i|k} + u_{i|k}^{\top} R u_{i|k} \right) + x_{N|k}^{\top} P x_{N|k}
 $$
 
-subject to $x_0 = x(k)$, $x_{i+1} = A_d x_i + B_d u_i$, and $|u_i| \le u_{\max}$.
+subject to
 
-$P$ solves the discrete algebraic Riccati equation, so the terminal cost is the infinite-horizon unconstrained LQR cost-to-go. There is no terminal set, so the formulation carries no formal stability certificate.
+$$
+x_{0|k} = x(k), \qquad x_{i+1|k} = A_d x_{i|k} + B_d u_{i|k}, \qquad |u_{i|k}| \le u_{\max}
+$$
 
-The QP is built once in CVXPY with $x_0$ as a `Parameter` and re-solved with OSQP under warm start.
+Here, $x_{i|k}$ denotes the state predicted $i$ steps ahead using information available at time $k$.
+
+The matrix $P$ is obtained from the discrete algebraic Riccati equation, so the terminal cost $x_{N|k}^{\top} P x_{N|k}$ is the value function of the corresponding unconstrained infinite-horizon LQR problem. There is no terminal constraint or terminal invariant set, so this implementation does not provide a separate formal closed-loop stability certificate. After solving the optimization problem, only the first optimal input $u_k = u_{0|k}^{\star}$ is applied to the nonlinear plant. At the next sampling instant, the plant state is obtained again and the optimization is repeated.
+
+The QP is constructed once in CVXPY. The current state $x(k)$ enters the optimization through a `cp.Parameter` representing the initial predicted state $x_{0|k}$. At each sampling instant, the parameter value is updated with the current state and the same optimization problem is re-solved with OSQP using warm start.
 
 ## Defaults
 
-$m = 1$ kg, $l = 1$ m, $b = 0.15$, $g = 9.81$, $\Delta t = 0.01$ s, $N = 100$, $Q = \mathrm{diag}(20, 1)$, $R = 0.1$, $u_{\max} = 5$ N·m, $x_0 = [60^{\circ}, 0]$, 10 s simulation.
+| Parameter | Value |
+| --- | --- |
+| Mass $m$ | 1 kg |
+| Length $l$ | 1 m |
+| Friction $b$ | 0.15 |
+| Gravity $g$ | 9.81 m/s² |
+| Sampling time $\Delta t$ | 0.01 s |
+| Horizon $N$ | 100 steps (1 s) |
+| Torque limit $u_{\max}$ | 5 N·m |
+| Simulation duration | 10 s |
+
+The MPC weights are
+
+$$
+Q =
+\begin{bmatrix}
+20 & 0 \\
+0 & 1
+\end{bmatrix},
+\qquad
+R = 0.1
+$$
+
+The default initial condition is
+
+$$
+x_0 =
+\begin{bmatrix}
+60^{\circ} \\
+0
+\end{bmatrix}
+$$
 
 ## Results
 
-From $60^{\circ}$ the closed loop reaches $|\theta| < 1^{\circ}$ in 1.5 s with one small undershoot. The uncontrolled pendulum is still visibly oscillating at 10 s. The torque limit is active for the first 0.5 s.
+Starting from $\theta(0) = 60^{\circ}$, the closed loop reaches approximately $|\theta| < 1^{\circ}$ within about $1.5$ s, with one small undershoot. The uncontrolled pendulum remains visibly oscillatory at $10$ s. The torque limit is active during the initial part of the transient.
+The main role of MPC in this example is therefore not to stabilize an unstable equilibrium, but to shape the transient while explicitly respecting the actuator constraint.
 
-## Limits of validity
+## Limits of Validity
 
-The prediction model is linearized about $\theta = 0$, but the closed loop tolerates much more than the small-angle range and still converges from $170^{\circ}$. Only the first input is applied and it is recomputed from the measured state every 10 ms, so model error is corrected by feedback rather than accumulating. The predicted trajectories themselves are inaccurate far from the origin and are never relied on.
-
-Full state feedback, no observer, no measurement noise, and controller parameters matched exactly to the plant.
+The prediction model is linearized about $\theta = 0$, so its accuracy degrades as the pendulum moves farther from the equilibrium.
+In simulation, the closed loop may still converge from large initial angles such as $170^{\circ}$, but this is far outside the validity region of the linearization and should be interpreted as an empirical closed-loop result rather than a theoretical guarantee. Far from the origin, the predicted trajectories can be inaccurate. However, MPC applies only the first optimized input and reinitializes the optimization from the current nonlinear plant state at every sampling instant. Therefore, model mismatch does not simply accumulate over the entire maneuver as it would under open-loop execution.
+The implementation assumes full-state feedback: both $\theta$ and $\omega$ are known exactly from the simulator. There is currently no observer, measurement noise, external disturbance, or parameter mismatch.
 
 ## Run
 
 ```bash
 pip install -r requirements.txt
 python run.py
-```
-
-## Files
-
-```
-pendulum.py    # nonlinear dynamics, RK4, symbolic linearization, ZOH discretization
-mpc.py         # QP construction, DARE terminal cost, receding-horizon solve
-simulation.py  # closed-loop simulation against the nonlinear plant
-plotting.py    # plots
-run.py         # entry point
 ```
