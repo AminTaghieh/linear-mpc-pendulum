@@ -1,49 +1,50 @@
 import numpy as np
 
-from pendulum import rk4_step
+from pendulum import rk4_step, measure
 
 def simulate(
         controller,
         parameters,
         x0,
         dt,
-        simulation_time
+        simulation_time,
+        estimator=None,
+        sigma_v=0,
+        sigma_w=0,
+        seed=0
 ):
 
+    rng = np.random.default_rng(seed)
 
-    time=np.arange(
-        0,
-        simulation_time+dt,
-        dt
-    )
+    time = np.arange(0, simulation_time+dt, dt)
+    N = len(time)
 
+    x = np.zeros((N, 2))
+    x_hat = np.zeros((N, 2))
+    y = np.zeros((N-1, 2))
+    y_noise = np.zeros((N-1, 2))
+    u = np.zeros(N-1)
 
-    number_of_steps = len(time)
+    x[0] = x0
 
-    state = np.zeros(
-        (number_of_steps, 2)
-    )
+    for k in range(N-1):
 
-    input_signal = np.zeros(
-        number_of_steps-1
-    )
+        y[k] = x[k]                             # true state
+        y_k = measure(x[k], sigma_v, rng)       # noisy measurement
+        y_noise[k] = y_k
 
-    state[0] =x0
+        if estimator is None:
+            x_hat[k] = y_k                      # raw measurement, no filter
+        else:
+            x_hat[k] = estimator.update(y_k)
 
+        u[k] = controller.control(x_hat[k])
 
+        if estimator is not None and hasattr(estimator, "predict"):
+            estimator.predict(u[k])
 
-    for k in range(number_of_steps-1):
-        x = state[k]
+        w = rng.normal(0, sigma_w) if sigma_w > 0 else 0
 
-        u = controller.control(x)
+        x[k+1] = rk4_step(time[k], x[k], u[k], dt, parameters, w)
 
-        input_signal[k] =u
-
-        state[k+1] = rk4_step(
-            time[k],
-            x,
-            u,
-            dt,
-            parameters
-        )
-    return time, state, input_signal
+    return time, x, u, x_hat, y, y_noise
